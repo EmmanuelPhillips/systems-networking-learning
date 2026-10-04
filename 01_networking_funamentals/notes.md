@@ -193,3 +193,117 @@ representations:
   (e.g., `"192.0.2.1"`) into binary network byte order (`in_addr` / `in6_addr`).
 - `inet_ntop()` (network to presentation): Converts binary address structures
   back into human-readable strings.
+
+Use `getaddrinfo()` to get from a hostname (<https://www.example.com>) to
+numeric IP address, so the above can be called.
+
+--------------------------------------------------------------------------------
+
+## Private Networks
+
+Firewalls hide networks for protection. They translate internal IP's to external
+using Network Address Translation (NAT). This means that if you have one IP that
+is public, you can then have a firewall perform NAT to have it routed to another
+device under that IP.
+
+IPv6 also has private networks. NAT and IPv6 don't mix too well, but in theory
+IPv6 provides so many addresses you wouldn't need NAT.
+
+--------------------------------------------------------------------------------
+
+## System Calls or Bust
+
+`getaddrinfo()` became extremely useful. rather than having to use a function to
+do Domain Name Server (DNS) lookups, and then loading info in to a struct
+sockaddr_in by hand, `getaddrinfo()` can handle all of it.
+
+```c
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+
+int getaddrinfo(const char *node, // "www.example.com", or IP
+                const char *service, // "http", or port number
+                const struct addrinfo *hints, // points to struct addrinfo, filled out with relevant info
+                struct addrinfo **res);
+```
+
+By providing the above function with 3 input parameters, it will return a
+pointer to a linked list, res, of results.
+
+If in a server who wants to listen to your host IP.
+
+```c
+int status;
+struct addrinfo hints;
+struct addrinfo *servinfo; // points to results
+
+memset(&hints, 0, sizeof hints); // empty the struct 
+hints.ai_family = AF_UNSPEC; // no preference of IPv4 and IPv6
+hints.ai_socktype = SOCK_STREAM; // ensure its a stream socket (uses TCP)
+hints.ai_flags = AI_PASSIVE; // getaddrinfo()  will assign the address based on the socket structure
+
+if ((status = getaddrinfor(NULL, "3490", &hints, &servinfo)) != 0) { 
+  fprintf(stderr, "gai error: %s\n", gai_strerror(status));
+  exit(1);
+}
+// if its = 0 it means it filled correctly, so the if statement only prints error if theres an error
+
+// do foo() here with your linked list result
+
+freeaddrinfo(servinfo); // free linked list once done with it
+```
+
+--------------------------------------------------------------------------------
+
+## `socket()`
+
+`socket()` will get you the file descriptor. Remember, this is just a number to
+help you index files.
+
+```c
+#include <sys/types.h>
+#include <sys/socket.h>
+
+int socket(int domain, int type, int protocol);
+```
+
+The arguments in the above function call allow you to state what type of socket
+you want.
+
+- IPv4 or IPv6
+- SOCK_STREAM or SOCK_DGRAM
+- TCP or UDP You used to have to hardcode these values (and that's still an
+  option), but `getprotobyname()` looks up the protocol you want.
+
+After calling `getaddrinfo()`, you can feed the returned values into `socket()`
+directly.
+
+```c
+int s;
+struct addrinfo hints, *res;
+
+getaddrinfo("www.example.com", "http", &hints, &res);
+
+s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+```
+
+`socket()` returns a socket descriptor for later system calls, or -1 if error.
+
+--------------------------------------------------------------------------------
+
+## `bind()`
+
+Once you have a socket you may want to associate it to a port on your machine.
+`bind()` allows you to do so.
+
+```c
+#include <sys/types.h>
+#include <sys/socket.h>
+
+int bind (int sockfd, struct sockaddr *my_addr, int addrlen);
+```
+
+- sockfd is file descriptor returned by `socket()`
+- my_addr is a pointer to struct sockaddr, containing info about address.
+- addrlen is the length of that address, in bytes.
