@@ -6,3 +6,4 @@ set(CMAKE_C_STANDARD 11)
 add_compile_options(-Wall -Wextra)
 
 add_executable(server 01_networking_funamentals/server.c)
+add_executable(client _networking_funamentals/client.c)
