@@ -1,135 +1,99 @@
+// imports needed for stream client
 #include <arpa/inet.h>
-#include <errno.h>
 #include <netdb.h>
-#include <netinet/in.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
-#define PORT "3490" // Port clients will connect to
-#define BACKLOG 10  // Max pending connections allowed in system queue
+#define PORT "3490"     // the port the server is listening on
+#define MAXDATASIZE 100 // max number of bytes we can receive at once
 
-// Signal handler to reap dead child processes created by fork()
-void sigchld_handler(int s) {
-  int saved_errno = errno;
-  while (waitpid(-1, NULL, WNOHANG) > 0)
-    ;
-  errno = saved_errno;
-}
-
-// Extracts IPv4 or IPv6 address pointer from sockaddr struct
+// picks the ipv4 or ipv6 address out of a generic sockaddr and returns a
+// pointer to it
 void *get_in_addr(struct sockaddr *sa) {
   if (sa->sa_family == AF_INET) {
-    return &(((struct sockaddr_in *)sa)->sin_addr);
+    return &(((struct sockaddr_in *)sa)
+                 ->sin_addr); // pointer to the 4 byte ipv4 address
   }
-  return &(((struct sockaddr_in6 *)sa)->sin6_addr);
+  return &(((struct sockaddr_in6 *)sa)
+               ->sin6_addr); // pointer to the 16 byte ipv6 address
 }
 
-int main(void) {
-  int sockfd,
-      new_fd; // sockfd = listening socket; new_fd = active connection socket
-  struct addrinfo hints, *servinfo, *p;
-  struct sockaddr_storage their_addr; // Store connecting client's address info
-  socklen_t sin_size;
-  struct sigaction sa;
-  int yes = 1;
-  char s[INET6_ADDRSTRLEN];
-  int rv;
+int main(int argc, char *argv[]) {
+  struct addrinfo hints;     // describes what kind of address we want
+  struct addrinfo *servinfo; // head of the linked list of results
+  struct addrinfo *p;        // cursor for walking the list
 
-  memset(&hints, 0, sizeof hints);
-  hints.ai_family = AF_UNSPEC;     // IPv4 or IPv6
-  hints.ai_socktype = SOCK_STREAM; // TCP stream socket
-  hints.ai_flags = AI_PASSIVE;     // Use my local machine's IP automatically
+  int sockfd;               // socket file descriptor
+  int numbytes;             // how many bytes recv actually received
+  int rv;                   // return value of getaddrinfo
+  char buf[MAXDATASIZE];    // buffer the received message is written into
+  char s[INET6_ADDRSTRLEN]; // buffer for a printable address
 
-  if ((rv = getaddrinfo(NULL, PORT, &hints, &servinfo)) != 0) {
+  if (argc !=
+      2) { // argv[0] is the program name, argv[1] is the host to connect to
+    fprintf(stderr, "usage: client hostname\n");
+    exit(1);
+  }
+
+  memset(&hints, 0, sizeof hints); // zero out hints
+  hints.ai_family = AF_UNSPEC;     // ipv4 or ipv6
+  hints.ai_socktype = SOCK_STREAM; // tcp
+  // no AI_PASSIVE: we want the address of the host we name, not our own
+
+  if ((rv = getaddrinfo(argv[1], PORT, &hints, &servinfo)) != 0) {
     fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
     return 1;
   }
 
-  // Loop through results and bind to the first available socket
+  // debug loop: print every address found for the host (no freeing in here)
+  for (p = servinfo; p != NULL; p = p->ai_next) {
+    inet_ntop(p->ai_family, get_in_addr(p->ai_addr), s, sizeof s);
+    printf("found: family %d -> %s\n", p->ai_family, s);
+  }
+
+  // loop through results, connect to the first one we can
   for (p = servinfo; p != NULL; p = p->ai_next) {
     if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-      perror("server: socket");
-      continue;
+      perror("client: socket");
+      continue; // try the next result
     }
 
-    // SO_REUSEADDR allows port reuse immediately after restart (prevents
-    // "Address already in use" errors)
-    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-      perror("setsockopt");
-      exit(1);
-    }
-
-    // Bind socket to local port 3490
-    if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
+    if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
       close(sockfd);
-      perror("server: bind");
-      continue;
+      perror("client: connect");
+      continue; // try the next result
     }
 
-    break; // Successfully bound!
+    break; // socket created and connected, stop looking
   }
-
-  freeaddrinfo(servinfo); // Done with servinfo linked list
 
   if (p == NULL) {
-    fprintf(stderr, "server: failed to bind\n");
+    fprintf(stderr, "client: failed to connect\n");
+    return 2;
+  }
+
+  // must come before freeaddrinfo, because p points into the list
+  inet_ntop(p->ai_family, get_in_addr(p->ai_addr), s, sizeof s);
+  printf("client: connecting to %s\n", s);
+
+  freeaddrinfo(servinfo); // done with the list, only free it once
+
+  // receive the server's message (leave one byte spare for the null terminator)
+  if ((numbytes = recv(sockfd, buf, MAXDATASIZE - 1, 0)) == -1) {
+    perror("recv");
     exit(1);
   }
 
-  // Start listening for incoming connections
-  if (listen(sockfd, BACKLOG) == -1) {
-    perror("listen");
-    exit(1);
-  }
+  buf[numbytes] =
+      '\0'; // recv does not null terminate, so we do it to print as a string
 
-  // Set up sigaction to reap zombie child processes
-  sa.sa_handler = sigchld_handler;
-  sigemptyset(&sa.sa_mask);
-  sa.sa_flags = SA_RESTART;
-  if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-    perror("sigaction");
-    exit(1);
-  }
+  printf("client: received '%s'\n", buf);
 
-  printf("server: waiting for connections...\n");
-
-  // Main accept loop
-  while (1) {
-    sin_size = sizeof their_addr;
-    // accept() blocks until a client calls connect(), then creates new_fd
-    // specifically for that client
-    new_fd = accept(sockfd, (struct sockaddr *)&their_addr, &sin_size);
-    if (new_fd == -1) {
-      perror("accept");
-      continue;
-    }
-
-    inet_ntop(their_addr.ss_family, get_in_addr((struct sockaddr *)&their_addr),
-              s, sizeof s);
-    printf("server: got connection from %s\n", s);
-
-    // fork() creates a child process to handle this specific client connection
-    if (!fork()) {
-      close(sockfd); // Child process doesn't need the listening socket
-
-      // Send message to client using new_fd
-      if (send(new_fd, "Hello, world!", 13, 0) == -1) {
-        perror("send");
-      }
-
-      close(new_fd); // Close client connection in child
-      exit(0);       // Child process finishes and exits
-    }
-
-    close(
-        new_fd); // Parent process closes new_fd (child process is handling it)
-  }
+  close(sockfd);
 
   return 0;
 }
